@@ -1,80 +1,100 @@
 import 'package:flutter/material.dart';
-import 'screens/home_screen.dart';
-import 'screens/cobros_screen.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:sqflite/sqflite.dart'; // Importación de sqflite
+import 'dart:io'; // Para Directory
+import 'firebase_options.dart';
+import 'screens/login_screen.dart';
+import 'screens/main_screen.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
-void main() {
-  runApp(const MyApp());
+Future<void> main() async {
+  // 0. Inicializar sqflite_common_ffi para desktop
+  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
+  // 1. Asegurar la inicialización de Flutter
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // 2. Configuración inicial de la base de datos
+  try {
+    // Verificar/crear directorio de la base de datos
+    final databasesPath = await getDatabasesPath();
+    await Directory(databasesPath).create(recursive: true);
+    print('Ruta de la base de datos: $databasesPath');
+  } catch (e) {
+    print('Error al configurar ruta de DB: $e');
+  }
+
+  // 3. Inicialización de Firebase
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+    print('Firebase inicializado correctamente');
+  } catch (e) {
+    print('Error al inicializar Firebase: $e');
+    // Puedes decidir si quieres continuar sin Firebase o terminar la app
+  }
+
+  // 4. Ejecutar la aplicación
+  runApp(const AuthWrapper());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class AuthWrapper extends StatelessWidget {
+  const AuthWrapper({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'App de Cobros',
-      theme: ThemeData(primarySwatch: Colors.blue, useMaterial3: true),
-      home: const MainScreen(),
-    );
-  }
-}
-
-class MainScreen extends StatefulWidget {
-  const MainScreen({super.key});
-
-  @override
-  State<MainScreen> createState() => _MainScreenState();
-}
-
-class _MainScreenState extends State<MainScreen> {
-  int _selectedIndex = 0;
-
-  final List<Widget> _screens = [const HomeScreen(), const CobrosScreen()];
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('CLIQ'),
-        backgroundColor: Theme.of(context).primaryColor,
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+        useMaterial3: true,
+        visualDensity: VisualDensity.adaptivePlatformDensity,
       ),
-      drawer: Drawer(
-        child: ListView(
-          padding: EdgeInsets.zero,
-          children: [
-            const DrawerHeader(
-              decoration: BoxDecoration(color: Colors.blue),
-              child: Text(
-                'Menú Principal',
-                style: TextStyle(color: Colors.white, fontSize: 24),
+      home: StreamBuilder<User?>(
+        stream: FirebaseAuth.instance.authStateChanges(),
+        builder: (context, snapshot) {
+          // Estado de conexión
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Scaffold(
+              body: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    CircularProgressIndicator(),
+                    SizedBox(height: 20),
+                    Text('Verificando autenticación...'),
+                  ],
+                ),
               ),
-            ),
-            ListTile(
-              leading: const Icon(Icons.home),
-              title: const Text('Inicio'),
-              selected: _selectedIndex == 0,
-              onTap: () {
-                setState(() {
-                  _selectedIndex = 0;
-                });
-                Navigator.pop(context);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.payment),
-              title: const Text('Cobros'),
-              selected: _selectedIndex == 1,
-              onTap: () {
-                setState(() {
-                  _selectedIndex = 1;
-                });
-                Navigator.pop(context);
-              },
-            ),
-          ],
-        ),
+            );
+          }
+
+          // Errores
+          if (snapshot.hasError) {
+            return Scaffold(
+              body: Center(
+                child: Text(
+                  'Error: ${snapshot.error.toString()}',
+                  style: const TextStyle(color: Colors.red),
+                ),
+              ),
+            );
+          }
+
+          // Usuario autenticado
+          if (snapshot.hasData && snapshot.data != null) {
+            return const MainScreen();
+          }
+
+          // No autenticado
+          return const LoginScreen();
+        },
       ),
-      body: _screens[_selectedIndex],
     );
   }
 }
