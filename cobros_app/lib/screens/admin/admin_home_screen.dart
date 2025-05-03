@@ -238,7 +238,7 @@ class _AddUserFormState extends State<AddUserForm> {
     setState(() => _isLoading = true);
     try {
       final authService = AuthService();
-      final user = await authService.registerWithRole(
+      final user = await authService.registerUserWithRole(
         email: _emailController.text.trim(),
         password: _passwordController.text.trim(),
         role: widget.role,

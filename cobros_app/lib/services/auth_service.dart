@@ -7,6 +7,8 @@ class AuthService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final GoogleSignIn _googleSignIn = GoogleSignIn();
 
+  User? get currentUser => _auth.currentUser;
+
   // Método de registro básico (público)
   Future<User?> registerUser({
     required String email,
