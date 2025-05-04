@@ -2,11 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:sqflite/sqflite.dart'; // Importación de sqflite
+import 'package:path_provider/path_provider.dart'; // Para getDatabasesPath
 import 'dart:io'; // Para Directory
 import 'firebase_options.dart';
 import 'screens/login_screen.dart';
 import 'screens/main_screen.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'services/user_service.dart';
 
 Future<void> main() async {
   // 0. Inicializar sqflite_common_ffi para desktop
@@ -88,7 +90,18 @@ class AuthWrapper extends StatelessWidget {
 
           // Usuario autenticado
           if (snapshot.hasData && snapshot.data != null) {
-            return const MainScreen();
+            return FutureBuilder<Map<String, dynamic>?>(
+              future: UserService().getCurrentUserData(),
+              builder: (context, userSnapshot) {
+                if (userSnapshot.connectionState == ConnectionState.waiting) {
+                  return const CircularProgressIndicator();
+                }
+
+                final role = userSnapshot.data?['role'] ?? 'user';
+
+                return MainScreen(userRole: role);
+              },
+            );
           }
 
           // No autenticado

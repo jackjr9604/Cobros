@@ -51,23 +51,25 @@ class UserService {
 
   // Obtener datos del usuario actual con información de Auth + Firestore
   Future<Map<String, dynamic>?> getCurrentUserData() async {
-    final user = _auth.currentUser;
-    if (user == null) return null;
-
     try {
-      final userDoc = await _firestore.collection('users').doc(user.uid).get();
-      final isAdmin = await isCurrentUserAdmin();
+      final user = _auth.currentUser;
+      if (user == null) return null;
+
+      final doc = await _firestore.collection('users').doc(user.uid).get();
+
+      if (!doc.exists) {
+        print('Documento de usuario no existe');
+        return null;
+      }
 
       return {
         'uid': user.uid,
         'email': user.email,
-        'displayName': user.displayName,
-        'photoUrl': user.photoURL,
-        'isAdmin': isAdmin,
-        ...?userDoc.data(),
+        'role': doc.data()?['role'] ?? 'user', // Asegurar campo role
+        'officeId': doc.data()?['officeId'],
       };
     } catch (e) {
-      print('Error obteniendo datos usuario: $e');
+      print('Error detallado: $e'); // Log más descriptivo
       return null;
     }
   }

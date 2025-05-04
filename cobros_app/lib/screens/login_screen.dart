@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../screens/register_screen.dart';
 import 'main_screen.dart';
+import '../services/user_service.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -121,17 +122,16 @@ class _LoginScreenState extends State<LoginScreen> {
         );
 
         if (user != null && mounted) {
+          final userData = await UserService().getCurrentUserData();
+          final role = userData?['role'] ?? 'user';
+
           Navigator.pushReplacement(
             context,
-            MaterialPageRoute(builder: (context) => const MainScreen()),
+            MaterialPageRoute(builder: (context) => MainScreen(userRole: role)),
           );
         }
       } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text(e.toString())));
-        }
+        // Manejo de errores
       } finally {
         if (mounted) setState(() => _isLoading = false);
       }
@@ -143,9 +143,12 @@ class _LoginScreenState extends State<LoginScreen> {
     try {
       final user = await _authService.signInWithGoogle();
       if (user != null && mounted) {
+        final userData = await UserService().getCurrentUserData();
+        final role = userData?['role'] ?? 'user';
+
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(builder: (context) => const MainScreen()),
+          MaterialPageRoute(builder: (context) => MainScreen(userRole: role)),
         );
       }
     } catch (e) {

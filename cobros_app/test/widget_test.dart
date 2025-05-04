@@ -12,7 +12,11 @@ import 'package:cobros_app/screens/main_screen.dart';
 void main() {
   testWidgets('Counter increments smoke test', (WidgetTester tester) async {
     // Build our app and trigger a frame.
-    await tester.pumpWidget(const MainScreen());
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MainScreen(userRole: 'user'), // Rol por defecto para pruebas
+      ),
+    );
 
     // Verify that our counter starts at 0.
     expect(find.text('0'), findsOneWidget);

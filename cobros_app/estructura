@@ -201,6 +201,7 @@ class DefaultFirebaseOptions {
 
 
 
+
 //TODO Utils
     //TODO AP/cobros_app/lib/utils/responsive.dart
 
@@ -236,127 +237,291 @@ class Responsive {
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import '../models/user_model.dart';
 import 'package:google_sign_in/google_sign_in.dart';
-import 'package:flutter/services.dart';
 
 class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final GoogleSignIn _googleSignIn = GoogleSignIn();
 
-  // Registrar usuario
-  Future<AppUser?> register(String email, String password) async {
-    try {
-      UserCredential userCredential = await _auth
-          .createUserWithEmailAndPassword(email: email, password: password);
+  User? get currentUser => _auth.currentUser;
 
-      // Guardar información adicional en Firestore
-      await _firestore.collection('users').doc(userCredential.user?.uid).set({
-        'email': email,
-        'password': password, // Solo para propósitos educativos
-        'createdAt': Timestamp.now(),
+  // Método de registro básico (público)
+  Future<User?> registerUser({
+    required String email,
+    required String password,
+    String? displayName,
+  }) async {
+    try {
+      // 1. Registrar usuario en Firebase Auth
+      final userCredential = await _auth.createUserWithEmailAndPassword(
+        email: email,
+        password: password,
+      );
+
+      // 2. Crear perfil del usuario en Firestore
+      await _createUserProfile(
+        user: userCredential.user!,
+        displayName: displayName,
+      );
+
+      return userCredential.user;
+    } on FirebaseAuthException catch (e) {
+      throw _handleAuthError(e.code);
+    }
+  }
+
+  // Método para registrar usuarios con roles (admin, owner, collector)
+  Future<User?> registerUserWithRole({
+    required String email,
+    required String password,
+    required String role,
+    String? officeId, // Para cobradores y dueños
+    String? officeName, // Solo para crear nueva oficina con dueño
+    String? displayName,
+  }) async {
+    User? user; // Declaración movida aquí para que sea visible en el catch
+
+    try {
+      // Registrar el usuario
+      user = await registerUser(
+        email: email,
+        password: password,
+        displayName: displayName,
+      );
+
+      if (user == null) return null;
+
+      // Si es dueño y se proporciona nombre de oficina, crear oficina
+      String? newOfficeId;
+      if (role == 'owner' && officeName != null) {
+        final officeRef = await _firestore.collection('offices').add({
+          'name': officeName,
+          'createdAt': FieldValue.serverTimestamp(),
+          'createdBy': _auth.currentUser?.uid,
+        });
+        newOfficeId = officeRef.id;
+      }
+
+      // Actualizar perfil con información de rol
+      await _firestore.collection('users').doc(user.uid).update({
+        'role': role,
+        if (newOfficeId != null) 'officeId': newOfficeId,
+        if (officeId != null) 'officeId': officeId,
+        'updatedAt': FieldValue.serverTimestamp(),
       });
 
-      return AppUser(
-        id: userCredential.user!.uid,
-        email: email,
-        password: password,
-      );
+      return user;
     } catch (e) {
-      print("Error al registrar: $e");
-      return null;
+      // Si falla, eliminar el usuario creado
+      if (user != null) {
+        await user.delete();
+      }
+      rethrow;
     }
   }
 
-  // Iniciar sesión
-  Future<AppUser?> login(String email, String password) async {
+  // Método para que dueños registren cobradores
+  Future<User?> registerCollector({
+    required String email,
+    required String password,
+    required String officeId,
+    String? displayName,
+  }) async {
+    // Verificar que el usuario actual es dueño de esta oficina
+    final currentUserData = await getCurrentUserData();
+    if (currentUserData?['role'] != 'owner' ||
+        currentUserData?['officeId'] != officeId) {
+      throw Exception(
+        'No tienes permisos para registrar cobradores en esta oficina',
+      );
+    }
+
+    // Registrar el cobrador
+    return registerUserWithRole(
+      email: email,
+      password: password,
+      role: 'collector',
+      officeId: officeId,
+      displayName: displayName,
+    );
+  }
+
+  // Método privado para crear perfil inicial
+  Future<void> _createUserProfile({
+    required User user,
+    String? displayName,
+  }) async {
+    await _firestore.collection('users').doc(user.uid).set({
+      'email': user.email,
+      'displayName': displayName ?? user.displayName,
+      'photoUrl': user.photoURL,
+      'role': 'user', // Rol por defecto
+      'createdAt': FieldValue.serverTimestamp(),
+      'isActive': true,
+    });
+  }
+
+  // Obtener datos del usuario actual
+  Future<Map<String, dynamic>?> getCurrentUserData() async {
+    final user = _auth.currentUser;
+    if (user == null) return null;
+    final doc = await _firestore.collection('users').doc(user.uid).get();
+    return doc.data();
+  }
+
+  // Método para iniciar sesión con email y contraseña (antes llamado "login")
+  Future<User?> signInWithEmailAndPassword({
+    required String email,
+    required String password,
+  }) async {
     try {
-      UserCredential userCredential = await _auth.signInWithEmailAndPassword(
+      final userCredential = await _auth.signInWithEmailAndPassword(
         email: email,
         password: password,
       );
-
-      DocumentSnapshot userDoc =
-          await _firestore
-              .collection('users')
-              .doc(userCredential.user?.uid)
-              .get();
-
-      return AppUser.fromFirestore(
-        userDoc.data() as Map<String, dynamic>,
-        userDoc.id,
-      );
-    } catch (e) {
-      print("Error al iniciar sesión: $e");
-      return null;
+      return userCredential.user;
+    } on FirebaseAuthException catch (e) {
+      throw _handleAuthError(e.code);
     }
   }
-
-  // Cerrar sesión
-  Future<void> logout() async {
-    await _auth.signOut();
-    await _googleSignIn.signOut(); // Cierra la sesión de Google también
-  }
-
-  // Verificar si hay sesión activa
-  Stream<User?> get authStateChanges => _auth.authStateChanges();
 
   // Método para iniciar sesión con Google
   Future<User?> signInWithGoogle() async {
     try {
-      final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
-      if (googleUser == null) {
-        throw Exception('Usuario canceló el inicio de sesión');
-      }
+      final googleUser = await _googleSignIn.signIn();
+      if (googleUser == null) return null;
 
-      final GoogleSignInAuthentication googleAuth =
-          await googleUser.authentication;
-
-      if (googleAuth.idToken == null) {
-        throw Exception('No se pudo obtener el ID token de Google');
-      }
-
-      final OAuthCredential credential = GoogleAuthProvider.credential(
+      final googleAuth = await googleUser.authentication;
+      final credential = GoogleAuthProvider.credential(
         accessToken: googleAuth.accessToken,
         idToken: googleAuth.idToken,
       );
 
-      UserCredential userCredential = await _auth.signInWithCredential(
-        credential,
-      );
+      final userCredential = await _auth.signInWithCredential(credential);
 
-      if (userCredential.user == null) {
-        throw Exception('No se pudo autenticar con Firebase');
-      }
-
-      // Guardar usuario en Firestore si es nuevo
+      // Crear perfil si es nuevo usuario
       if (userCredential.additionalUserInfo?.isNewUser ?? false) {
         await _firestore.collection('users').doc(userCredential.user!.uid).set({
-          'uid': userCredential.user!.uid,
           'email': userCredential.user!.email,
-          'name': userCredential.user!.displayName,
+          'displayName': userCredential.user!.displayName,
           'photoUrl': userCredential.user!.photoURL,
           'createdAt': FieldValue.serverTimestamp(),
+          'isActive': true,
         });
       }
 
       return userCredential.user;
-    } on FirebaseAuthException catch (e) {
-      print('Firebase Auth Error: ${e.code} - ${e.message}');
-      rethrow;
-    } on PlatformException catch (e) {
-      print('Platform Error: ${e.code} - ${e.message}');
-      rethrow;
     } catch (e) {
-      print('Unknown Error: $e');
-      rethrow;
+      print('Error en Google Sign-In: $e');
+      return null;
     }
   }
 
-  // Método para cerrar sesión con Google
-  Future<void> signOutGoogle() async {
-    await _googleSignIn.signOut();
+  // Método para cerrar sesión
+  Future<void> signOut() async {
+    try {
+      await _auth.signOut();
+      await _googleSignIn.signOut();
+    } catch (e) {
+      print('Error al cerrar sesión: $e');
+      throw Exception('No se pudo cerrar la sesión correctamente');
+    }
+  }
+
+  // Manejo de errores
+  Exception _handleAuthError(String code) {
+    switch (code) {
+      case 'user-not-found':
+      case 'wrong-password':
+        return Exception('Correo o contraseña incorrectos');
+      case 'user-disabled':
+        return Exception('La cuenta ha sido deshabilitada');
+      case 'too-many-requests':
+        return Exception('Demasiados intentos. Intenta más tarde');
+      case 'invalid-email':
+        return Exception('El correo electrónico no es válido');
+      default:
+        return Exception('Error al iniciar sesión: $code');
+    }
+  }
+}
+
+
+     //TODO AP/cobros_app/lib/services/user_service.dart
+
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+class UserService {
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final FirebaseAuth _auth = FirebaseAuth.instance;
+
+  // Obtener todos los usuarios registrados en Firestore
+  Future<List<Map<String, dynamic>>> getAllUsers() async {
+    try {
+      final usersSnapshot = await _firestore.collection('users').get();
+      final adminsSnapshot = await _firestore.collection('admins').get();
+
+      final adminUids = adminsSnapshot.docs.map((doc) => doc.id).toSet();
+
+      return usersSnapshot.docs.map((doc) {
+        return {
+          'uid': doc.id,
+          ...doc.data(),
+          'isAdmin': adminUids.contains(doc.id),
+        };
+      }).toList();
+    } catch (e) {
+      print('Error al obtener usuarios: $e');
+      throw Exception('Error cargando usuarios');
+    }
+  }
+
+  // Verificar si el usuario actual es admin
+  Future<bool> isCurrentUserAdmin() async {
+    final user = _auth.currentUser;
+    if (user == null) return false;
+
+    final adminDoc = await _firestore.collection('admins').doc(user.uid).get();
+    return adminDoc.exists;
+  }
+
+  // Convertir usuario en admin
+  Future<void> promoteToAdmin(String uid, String email) async {
+    await _firestore.collection('admins').doc(uid).set({
+      'email': email,
+      'promotedAt': FieldValue.serverTimestamp(),
+      'promotedBy': _auth.currentUser?.uid,
+    });
+  }
+
+  // Remover permisos de admin
+  Future<void> demoteAdmin(String uid) async {
+    await _firestore.collection('admins').doc(uid).delete();
+  }
+
+  // Obtener datos del usuario actual con información de Auth + Firestore
+  Future<Map<String, dynamic>?> getCurrentUserData() async {
+    final user = _auth.currentUser;
+    if (user == null) return null;
+
+    try {
+      final userDoc = await _firestore.collection('users').doc(user.uid).get();
+      final isAdmin = await isCurrentUserAdmin();
+
+      return {
+        'uid': user.uid,
+        'email': user.email,
+        'displayName': user.displayName,
+        'photoUrl': user.photoURL,
+        'isAdmin': isAdmin,
+        ...?userDoc.data(),
+      };
+    } catch (e) {
+      print('Error obteniendo datos usuario: $e');
+      return null;
+    }
   }
 }
 
@@ -600,9 +765,1122 @@ class DatabaseHelper {
 }
 
 
-//TODO screens:
-  //TODO AP/cobros_app/lib/screens/register_screen.dart
 
+//TODO screens:
+
+       //TODO admin
+           //TODO AP/cobros_app/lib/screens/admin/admin_home_screen.dart
+
+import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import '../../services/auth_service.dart';
+import '../../services/user_service.dart';
+import 'users_screen.dart';
+import 'offices_screen.dart';
+
+class AdminHomeScreen extends StatefulWidget {
+  const AdminHomeScreen({super.key});
+
+  @override
+  State<AdminHomeScreen> createState() => _AdminHomeScreenState();
+}
+
+class _AdminHomeScreenState extends State<AdminHomeScreen> {
+  final UserService _userService = UserService();
+  int _userCount = 0;
+  int _officeCount = 0;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCounts();
+  }
+
+  Future<void> _loadCounts() async {
+    final users = await _userService.getAllUsers();
+    final offices =
+        await FirebaseFirestore.instance.collection('offices').get();
+
+    setState(() {
+      _userCount = users.length;
+      _officeCount = offices.size;
+      _isLoading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body:
+          _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Panel de Administración',
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Row(
+                      children: [
+                        _buildStatCard(
+                          'Usuarios',
+                          _userCount,
+                          Icons.people,
+                          Colors.blue,
+                          () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const UsersScreen(),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        _buildStatCard(
+                          'Oficinas',
+                          _officeCount,
+                          Icons.business,
+                          Colors.green,
+                          () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const OfficesScreen(),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 30),
+                    const Text(
+                      'Acciones Rápidas:',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        ActionChip(
+                          avatar: const Icon(Icons.add, size: 18),
+                          label: const Text('Nuevo Admin'),
+                          onPressed: () => _showAddUserDialog('admin'),
+                        ),
+                        ActionChip(
+                          avatar: const Icon(Icons.add_business, size: 18),
+                          label: const Text('Nueva Oficina'),
+                          onPressed:
+                              () => Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => const OfficesScreen(),
+                                ),
+                              ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+    );
+  }
+
+  Widget _buildStatCard(
+    String title,
+    int count,
+    IconData icon,
+    Color color,
+    VoidCallback onTap,
+  ) {
+    return Expanded(
+      child: Card(
+        elevation: 4,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(icon, color: color),
+                    const SizedBox(width: 8),
+                    Text(title, style: const TextStyle(fontSize: 16)),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  count.toString(),
+                  style: const TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showAddUserDialog(String role) {
+    showDialog(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: Text(
+              'Registrar nuevo ${role == 'admin' ? 'Administrador' : 'Dueño'}',
+            ),
+            content: AddUserForm(role: role),
+          ),
+    );
+  }
+}
+
+class AddUserForm extends StatefulWidget {
+  final String role;
+
+  const AddUserForm({super.key, required this.role});
+
+  @override
+  State<AddUserForm> createState() => _AddUserFormState();
+}
+
+class _AddUserFormState extends State<AddUserForm> {
+  final _formKey = GlobalKey<FormState>();
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _nameController = TextEditingController();
+  bool _isLoading = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Form(
+      key: _formKey,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextFormField(
+            controller: _emailController,
+            decoration: const InputDecoration(labelText: 'Email'),
+            validator:
+                (value) => value!.contains('@') ? null : 'Email inválido',
+          ),
+          TextFormField(
+            controller: _passwordController,
+            decoration: const InputDecoration(labelText: 'Contraseña'),
+            obscureText: true,
+            validator:
+                (value) => value!.length >= 6 ? null : 'Mínimo 6 caracteres',
+          ),
+          if (widget.role == 'owner')
+            TextFormField(
+              controller: _nameController,
+              decoration: const InputDecoration(
+                labelText: 'Nombre de la Oficina',
+              ),
+              validator: (value) => value!.isEmpty ? 'Requerido' : null,
+            ),
+          const SizedBox(height: 20),
+          _isLoading
+              ? const CircularProgressIndicator()
+              : ElevatedButton(
+                onPressed: _registerUser,
+                child: const Text('Registrar'),
+              ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _registerUser() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() => _isLoading = true);
+    try {
+      final authService = AuthService();
+      final user = await authService.registerUserWithRole(
+        email: _emailController.text.trim(),
+        password: _passwordController.text.trim(),
+        role: widget.role,
+        officeName: widget.role == 'owner' ? _nameController.text.trim() : null,
+      );
+
+      if (user != null && mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Usuario registrado exitosamente')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    _nameController.dispose();
+    super.dispose();
+  }
+}
+
+           //TODO AP/cobros_app/lib/screens/admin/offices_screen.dart
+
+           import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+class OfficesScreen extends StatefulWidget {
+  const OfficesScreen({super.key});
+
+  @override
+  State<OfficesScreen> createState() => _OfficesScreenState();
+}
+
+class _OfficesScreenState extends State<OfficesScreen> {
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final _formKey = GlobalKey<FormState>();
+  final _nameController = TextEditingController();
+  final _addressController = TextEditingController();
+  bool _isLoading = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Gestión de Oficinas'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.add),
+            onPressed: () => _showAddOfficeDialog(),
+          ),
+        ],
+      ),
+      body: StreamBuilder<QuerySnapshot>(
+        stream: _firestore.collection('offices').snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+            return const Center(child: Text('No hay oficinas registradas'));
+          }
+
+          return ListView.builder(
+            padding: const EdgeInsets.all(8),
+            itemCount: snapshot.data!.docs.length,
+            itemBuilder: (context, index) {
+              final office = snapshot.data!.docs[index];
+              return Card(
+                child: ListTile(
+                  title: Text(office['name']),
+                  subtitle: Text(office['address']),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.edit),
+                    onPressed: () => _showEditOfficeDialog(office),
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  void _showAddOfficeDialog() {
+    _nameController.clear();
+    _addressController.clear();
+
+    showDialog(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: const Text('Agregar Nueva Oficina'),
+            content: _buildOfficeForm(),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancelar'),
+              ),
+              ElevatedButton(
+                onPressed: _saveOffice,
+                child: const Text('Guardar'),
+              ),
+            ],
+          ),
+    );
+  }
+
+  void _showEditOfficeDialog(DocumentSnapshot office) {
+    _nameController.text = office['name'];
+    _addressController.text = office['address'];
+
+    showDialog(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            title: const Text('Editar Oficina'),
+            content: _buildOfficeForm(),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancelar'),
+              ),
+              ElevatedButton(
+                onPressed: () => _saveOffice(officeId: office.id),
+                child: const Text('Guardar'),
+              ),
+            ],
+          ),
+    );
+  }
+
+  Widget _buildOfficeForm() {
+    return Form(
+      key: _formKey,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextFormField(
+            controller: _nameController,
+            decoration: const InputDecoration(
+              labelText: 'Nombre de la Oficina',
+            ),
+            validator: (value) => value!.isEmpty ? 'Requerido' : null,
+          ),
+          TextFormField(
+            controller: _addressController,
+            decoration: const InputDecoration(labelText: 'Dirección'),
+            validator: (value) => value!.isEmpty ? 'Requerido' : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _saveOffice({String? officeId}) async {
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() => _isLoading = true);
+    try {
+      final officeData = {
+        'name': _nameController.text.trim(),
+        'address': _addressController.text.trim(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+
+      if (officeId == null) {
+        // Nueva oficina
+        officeData['createdAt'] = FieldValue.serverTimestamp();
+        await _firestore.collection('offices').add(officeData);
+      } else {
+        // Editar oficina existente
+        await _firestore.collection('offices').doc(officeId).update(officeData);
+      }
+
+      if (mounted) Navigator.pop(context);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _addressController.dispose();
+    super.dispose();
+  }
+}
+
+
+          //TODO AP/cobros_app/lib/screens/admin/users_screen.dart
+
+// screens/admin/users_screen.dart
+import 'package:flutter/material.dart';
+import '../../../services/user_service.dart';
+import 'package:intl/intl.dart';
+import 'package:cloud_firestore/cloud_firestore.dart'; // Para Timestamp
+
+class UsersScreen extends StatefulWidget {
+  const UsersScreen({super.key});
+
+  @override
+  _UsersScreenState createState() => _UsersScreenState();
+}
+
+class _UsersScreenState extends State<UsersScreen> {
+  final UserService _userService = UserService();
+  List<Map<String, dynamic>> _users = [];
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUsers();
+  }
+
+  Future<void> _loadUsers() async {
+    setState(() => _isLoading = true);
+    try {
+      final users = await _userService.getAllUsers();
+      setState(() => _users = users);
+    } catch (e) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: ${e.toString()}')));
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Gestión de Usuarios'),
+        actions: [
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _loadUsers),
+        ],
+      ),
+      body:
+          _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : ListView.builder(
+                itemCount: _users.length,
+                itemBuilder: (context, index) {
+                  final user = _users[index];
+                  return Card(
+                    margin: const EdgeInsets.all(8),
+                    child: ListTile(
+                      title: Text(user['email'] ?? 'Sin email'),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('UID: ${user['uid']}'),
+                          if (user['createdAt'] != null)
+                            Text(
+                              'Registrado: ${_formatDate(user['createdAt'])}',
+                            ),
+                          Text(
+                            user['isAdmin']
+                                ? 'ROL: ADMINISTRADOR'
+                                : 'ROL: USUARIO',
+                            style: TextStyle(
+                              color:
+                                  user['isAdmin'] ? Colors.green : Colors.blue,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      trailing: Switch(
+                        value: user['isAdmin'],
+                        onChanged: (value) => _toggleAdminStatus(user, value),
+                      ),
+                    ),
+                  );
+                },
+              ),
+    );
+  }
+
+  String _formatDate(dynamic date) {
+    if (date is Timestamp) {
+      return DateFormat('dd/MM/yyyy HH:mm').format(date.toDate());
+    }
+    return date.toString();
+  }
+
+  Future<void> _toggleAdminStatus(
+    Map<String, dynamic> user,
+    bool makeAdmin,
+  ) async {
+    try {
+      if (makeAdmin) {
+        await _userService.promoteToAdmin(user['uid'], user['email']);
+      } else {
+        await _userService.demoteAdmin(user['uid']);
+      }
+      _loadUsers(); // Refrescar lista
+    } catch (e) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error: ${e.toString()}')));
+    }
+  }
+}
+
+
+     //TODO collector
+
+          //TODO AP/cobros_app/lib/screens/collector/collector_home_screen.dart
+
+          import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:intl/intl.dart';
+import '../../services/auth_service.dart';
+
+class CollectorHomeScreen extends StatefulWidget {
+  const CollectorHomeScreen({super.key});
+
+  @override
+  State<CollectorHomeScreen> createState() => _CollectorHomeScreenState();
+}
+
+class _CollectorHomeScreenState extends State<CollectorHomeScreen> {
+  final AuthService _authService = AuthService();
+  String? _officeId;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadOfficeData();
+  }
+
+  Future<void> _loadOfficeData() async {
+    final userData = await _authService.getCurrentUserData();
+    setState(() {
+      _officeId = userData?['officeId'];
+      _isLoading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Mis Cobros'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _loadOfficeData,
+          ),
+        ],
+      ),
+      body:
+          _isLoading
+              ? const Center(child: CircularProgressIndicator())
+              : _officeId == null
+              ? const Center(child: Text('No estás asignado a una oficina'))
+              : _buildCollectorContent(),
+    );
+  }
+
+  Widget _buildCollectorContent() {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  const Text(
+                    'Resumen del Día',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 10),
+                  StreamBuilder<QuerySnapshot>(
+                    stream:
+                        FirebaseFirestore.instance
+                            .collection('payments')
+                            .where('officeId', isEqualTo: _officeId)
+                            .where(
+                              'collectorId',
+                              isEqualTo: _authService.currentUser?.uid,
+                            )
+                            .where(
+                              'date',
+                              isEqualTo: DateFormat(
+                                'yyyy-MM-dd',
+                              ).format(DateTime.now()),
+                            )
+                            .snapshots(),
+                    builder: (context, snapshot) {
+                      if (!snapshot.hasData) {
+                        return const CircularProgressIndicator();
+                      }
+
+                      final total = snapshot.data!.docs.fold<double>(
+                        0,
+                        (sum, doc) => sum + (doc['amount'] as num).toDouble(),
+                      );
+
+                      return Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: [
+                          _buildSummaryItem(
+                            'Cobros',
+                            snapshot.data!.docs.length.toString(),
+                          ),
+                          _buildSummaryItem(
+                            'Total',
+                            '\$${total.toStringAsFixed(2)}',
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        Expanded(
+          child: ListView(
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16.0),
+                child: Text(
+                  'Últimos Cobros',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+              ),
+              _buildRecentPayments(),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSummaryItem(String label, String value) {
+    return Column(
+      children: [
+        Text(label, style: const TextStyle(fontSize: 14, color: Colors.grey)),
+        Text(
+          value,
+          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRecentPayments() {
+    return StreamBuilder<QuerySnapshot>(
+      stream:
+          FirebaseFirestore.instance
+              .collection('payments')
+              .where('officeId', isEqualTo: _officeId)
+              .where('collectorId', isEqualTo: _authService.currentUser?.uid)
+              .orderBy('date', descending: true)
+              .limit(10)
+              .snapshots(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
+          return const Center(child: Text('No hay cobros registrados'));
+        }
+
+        return ListView.builder(
+          shrinkWrap: true,
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: snapshot.data!.docs.length,
+          itemBuilder: (context, index) {
+            final payment = snapshot.data!.docs[index];
+            return Card(
+              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: ListTile(
+                title: Text(payment['clientName']),
+                subtitle: Text(
+                  DateFormat('dd/MM/yyyy').format(payment['date'].toDate()),
+                ),
+                trailing: Text(
+                  '\$${payment['amount'].toStringAsFixed(2)}',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+
+    //TODO owner
+          //TODO AP/cobros_app/lib/screens/owner/owner_home_screen.dart
+
+          import 'package:flutter/material.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:intl/intl.dart';
+import '../../../services/auth_service.dart';
+import '../../../services/user_service.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
+class OwnerHomeScreen extends StatefulWidget {
+  const OwnerHomeScreen({super.key});
+
+  @override
+  State<OwnerHomeScreen> createState() => _OwnerHomeScreenState();
+}
+
+class _OwnerHomeScreenState extends State<OwnerHomeScreen> {
+  final AuthService _authService = AuthService();
+  final UserService _userService = UserService();
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+
+  final _formKey = GlobalKey<FormState>();
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _nameController = TextEditingController();
+
+  String? _officeId;
+  bool _isLoading = false;
+  List<Map<String, dynamic>> _collectors = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadOfficeData();
+    _loadCollectors();
+  }
+
+  Future<void> _loadOfficeData() async {
+    final userData = await _userService.getCurrentUserData();
+    setState(() {
+      _officeId = userData?['officeId'];
+    });
+  }
+
+  Future<void> _loadCollectors() async {
+    if (_officeId == null) return;
+
+    setState(() => _isLoading = true);
+    try {
+      final querySnapshot =
+          await _firestore
+              .collection('users')
+              .where('officeId', isEqualTo: _officeId)
+              .where('role', isEqualTo: 'collector')
+              .get();
+
+      setState(() {
+        _collectors =
+            querySnapshot.docs.map((doc) {
+              return {'id': doc.id, ...doc.data()};
+            }).toList();
+      });
+    } finally {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _registerCollector() async {
+    if (!_formKey.currentState!.validate() || _officeId == null) return;
+
+    setState(() => _isLoading = true);
+    try {
+      // 1. Crear usuario en Authentication
+      final userCredential = await FirebaseAuth.instance
+          .createUserWithEmailAndPassword(
+            email: _emailController.text.trim(),
+            password: _passwordController.text.trim(),
+          );
+
+      // 2. Guardar datos extendidos en Firestore
+      await _firestore.collection('users').doc(userCredential.user?.uid).set({
+        'email': _emailController.text.trim(),
+        'name': _nameController.text.trim(),
+        'role': 'collector',
+        'officeId': _officeId,
+        'createdBy': FirebaseAuth.instance.currentUser?.uid,
+        'createdAt': FieldValue.serverTimestamp(),
+        'isActive': true,
+      });
+
+      // 3. Actualizar lista
+      await _loadCollectors();
+
+      // 4. Mostrar feedback y limpiar formulario
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Cobrador registrado exitosamente')),
+        );
+        _formKey.currentState?.reset();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error: ${e.toString()}')));
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _toggleCollectorStatus(String userId, bool isActive) async {
+    try {
+      await _firestore.collection('users').doc(userId).update({
+        'isActive': isActive,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      await _loadCollectors();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error actualizando estado: ${e.toString()}')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Mi Oficina')),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Registrar Nuevo Cobrador',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 20),
+            Form(
+              key: _formKey,
+              child: Column(
+                children: [
+                  TextFormField(
+                    controller: _nameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Nombre Completo',
+                    ),
+                    validator: (value) {
+                      if (value == null || value.isEmpty) {
+                        return 'Ingrese el nombre del cobrador';
+                      }
+                      return null;
+                    },
+                  ),
+                  TextFormField(
+                    controller: _emailController,
+                    decoration: const InputDecoration(labelText: 'Email'),
+                    validator: (value) {
+                      if (value == null ||
+                          value.isEmpty ||
+                          !value.contains('@')) {
+                        return 'Ingrese un email válido';
+                      }
+                      return null;
+                    },
+                  ),
+                  TextFormField(
+                    controller: _passwordController,
+                    decoration: const InputDecoration(labelText: 'Contraseña'),
+                    obscureText: true,
+                    validator: (value) {
+                      if (value == null || value.length < 6) {
+                        return 'Mínimo 6 caracteres';
+                      }
+                      return null;
+                    },
+                  ),
+                  const SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: _isLoading ? null : _registerCollector,
+                    child:
+                        _isLoading
+                            ? const CircularProgressIndicator()
+                            : const Text('Registrar Cobrador'),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 40),
+            const Text(
+              'Cobradores Registrados',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            Expanded(
+              child:
+                  _isLoading
+                      ? const Center(child: CircularProgressIndicator())
+                      : _collectors.isEmpty
+                      ? const Center(
+                        child: Text('No hay cobradores registrados'),
+                      )
+                      : ListView.builder(
+                        itemCount: _collectors.length,
+                        itemBuilder: (context, index) {
+                          final collector = _collectors[index];
+                          return Card(
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            child: ListTile(
+                              title: Text(collector['name'] ?? 'Sin nombre'),
+                              subtitle: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(collector['email'] ?? 'Sin email'),
+                                  Text(
+                                    'Registrado: ${_formatDate(collector['createdAt'])}',
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                ],
+                              ),
+                              trailing: Switch(
+                                value: collector['isActive'] ?? false,
+                                onChanged:
+                                    (value) => _toggleCollectorStatus(
+                                      collector['id'],
+                                      value,
+                                    ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatDate(dynamic date) {
+    if (date == null) return 'Fecha desconocida';
+    if (date is Timestamp) {
+      return DateFormat('dd/MM/yyyy').format(date.toDate());
+    }
+    return date.toString();
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    _nameController.dispose();
+    super.dispose();
+  }
+}
+
+
+         //TODO AP/cobros_app/lib/screens/owner/register_collector_screen.dart
+
+         import 'package:flutter/material.dart';
+import '../../services/auth_service.dart';
+
+class RegisterCollectorScreen extends StatefulWidget {
+  final String officeId;
+
+  const RegisterCollectorScreen({super.key, required this.officeId});
+
+  @override
+  State<RegisterCollectorScreen> createState() =>
+      _RegisterCollectorScreenState();
+}
+
+class _RegisterCollectorScreenState extends State<RegisterCollectorScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _nameController = TextEditingController();
+  bool _isLoading = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Registrar Nuevo Cobrador')),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            children: [
+              TextFormField(
+                controller: _nameController,
+                decoration: const InputDecoration(labelText: 'Nombre Completo'),
+                validator: (value) => value!.isEmpty ? 'Requerido' : null,
+              ),
+              TextFormField(
+                controller: _emailController,
+                decoration: const InputDecoration(labelText: 'Email'),
+                validator:
+                    (value) => value!.contains('@') ? null : 'Email inválido',
+              ),
+              TextFormField(
+                controller: _passwordController,
+                decoration: const InputDecoration(labelText: 'Contraseña'),
+                obscureText: true,
+                validator:
+                    (value) =>
+                        value!.length >= 6 ? null : 'Mínimo 6 caracteres',
+              ),
+              const SizedBox(height: 20),
+              _isLoading
+                  ? const CircularProgressIndicator()
+                  : ElevatedButton(
+                    onPressed: _registerCollector,
+                    child: const Text('Registrar Cobrador'),
+                  ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _registerCollector() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() => _isLoading = true);
+    try {
+      final authService = AuthService();
+      final user = await authService.registerCollector(
+        email: _emailController.text.trim(),
+        password: _passwordController.text.trim(),
+        officeId: widget.officeId,
+        displayName: _nameController.text.trim(),
+      );
+
+      if (user != null && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Cobrador registrado exitosamente')),
+        );
+        Navigator.pop(context);
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    _nameController.dispose();
+    super.dispose();
+  }
+}
+
+
+
+
+  //TODO AP/cobros_app/lib/screens/register_screen.dart
 
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
@@ -1023,9 +2301,10 @@ class _CobrosScreenState extends State<CobrosScreen> {
 
 
 
+
   //TODO AP/cobros_app/lib/screens/clientes_screen.dart
 
-  import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:intl/intl.dart'; // Importación necesaria para DateFormat
 import '../models/cliente_models.dart';
 import '../data/database_helper.dart';
@@ -1311,11 +2590,12 @@ class HomeScreen extends StatelessWidget {
 
 
 
+
   //TODO AP/cobros_app/lib/screens/nuevo_cobro_screen.dart
 
 import 'package:flutter/material.dart';
 import '../models/cobro_model.dart';
-import '/models/cliente_models.dart';
+import '../models/cliente_models.dart';
 import '../data/database_helper.dart';
 import '../utils/responsive.dart';
 import 'nuevo_cliente_screen.dart';
@@ -1538,20 +2818,19 @@ class _NuevoCobroScreenState extends State<NuevoCobroScreen> {
 
 
 
+
     //TODO AP/cobros_app/lib/screens/login_screen.dart
 
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../screens/register_screen.dart';
-import 'package:firebase_auth/firebase_auth.dart'; // Añade este import
-// Para PlatformException
 import 'main_screen.dart';
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key}); // Cambio aquí
+  const LoginScreen({super.key});
 
   @override
-  _LoginScreenState createState() => _LoginScreenState();
+  State<LoginScreen> createState() => _LoginScreenState();
 }
 
 class _LoginScreenState extends State<LoginScreen> {
@@ -1569,130 +2848,137 @@ class _LoginScreenState extends State<LoginScreen> {
         padding: const EdgeInsets.all(16.0),
         child: Form(
           key: _formKey,
-          child: Column(
-            children: [
-              TextFormField(
-                controller: _emailController,
-                decoration: const InputDecoration(labelText: 'Email'),
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Por favor ingresa tu email';
-                  }
-                  return null;
-                },
-              ),
-              TextFormField(
-                controller: _passwordController,
-                decoration: const InputDecoration(labelText: 'Contraseña'),
-                obscureText: true,
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Por favor ingresa tu contraseña';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 20),
-              _isLoading
-                  ? const CircularProgressIndicator()
-                  : ElevatedButton(
-                    onPressed: _login,
-                    child: const Text('Iniciar Sesión'),
+          child: SingleChildScrollView(
+            child: Column(
+              children: [
+                TextFormField(
+                  controller: _emailController,
+                  decoration: const InputDecoration(
+                    labelText: 'Email',
+                    prefixIcon: Icon(Icons.email),
                   ),
-              TextButton(
-                onPressed: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => const RegisterScreen(),
-                    ),
-                  );
-                },
-                child: const Text('¿No tienes cuenta? Regístrate'),
-              ),
-              ElevatedButton.icon(
-                onPressed: () async {
-                  setState(() => _isLoading = true);
-                  try {
-                    final user = await _authService.signInWithGoogle();
-                    if (user != null) {
-                      Navigator.pushReplacement(
-                        context,
-                        MaterialPageRoute(
-                          builder: (context) => const MainScreen(),
+                  validator: (value) {
+                    if (value == null || value.isEmpty) {
+                      return 'Por favor ingresa tu email';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 16),
+                TextFormField(
+                  controller: _passwordController,
+                  decoration: const InputDecoration(
+                    labelText: 'Contraseña',
+                    prefixIcon: Icon(Icons.lock),
+                  ),
+                  obscureText: true,
+                  validator: (value) {
+                    if (value == null || value.isEmpty) {
+                      return 'Por favor ingresa tu contraseña';
+                    }
+                    if (value.length < 6) {
+                      return 'La contraseña debe tener al menos 6 caracteres';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 24),
+                _isLoading
+                    ? const CircularProgressIndicator()
+                    : SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: _login,
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 16),
                         ),
-                      );
-                    }
-                  } on FirebaseAuthException catch (e) {
-                    String errorMessage;
-                    switch (e.code) {
-                      case 'account-exists-with-different-credential':
-                        errorMessage =
-                            'Ya tienes una cuenta con este email. Usa otro método.';
-                        break;
-                      case 'invalid-credential':
-                        errorMessage = 'Credenciales inválidas o expiradas';
-                        break;
-                      case 'operation-not-allowed':
-                        errorMessage = 'Operación no permitida';
-                        break;
-                      default:
-                        errorMessage = 'Error desconocido: ${e.message}';
-                    }
-                    ScaffoldMessenger.of(
+                        child: const Text('Iniciar Sesión'),
+                      ),
+                    ),
+                const SizedBox(height: 16),
+                TextButton(
+                  onPressed: () {
+                    Navigator.push(
                       context,
-                    ).showSnackBar(SnackBar(content: Text(errorMessage)));
-                  } catch (e) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text('Error al iniciar con Google: $e'),
+                      MaterialPageRoute(
+                        builder: (context) => const RegisterScreen(),
                       ),
                     );
-                  } finally {
-                    setState(() => _isLoading = false);
-                  }
-                },
-                icon: Image.asset(
-                  'assets/images/google_logo.png', // Asegúrate de tener este asset
-                  height: 24,
-                  width: 24,
+                  },
+                  child: const Text('¿No tienes cuenta? Regístrate aquí'),
                 ),
-                label: const Text('Iniciar con Google'),
-                style: ElevatedButton.styleFrom(
-                  minimumSize: const Size(double.infinity, 50),
+                const SizedBox(height: 24),
+                const Divider(),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _signInWithGoogle,
+                    icon: Image.asset(
+                      'assets/images/google_logo.png',
+                      height: 24,
+                      width: 24,
+                    ),
+                    label: const Text('Iniciar sesión con Google'),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      side: const BorderSide(color: Colors.grey),
+                    ),
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
     );
   }
 
-  // En el método _login, cambia MyApp por MainScreen
   Future<void> _login() async {
     if (_formKey.currentState!.validate()) {
       setState(() => _isLoading = true);
+      try {
+        final user = await _authService.signInWithEmailAndPassword(
+          email: _emailController.text.trim(),
+          password: _passwordController.text.trim(),
+        );
 
-      final email = _emailController.text.trim();
-      final password = _passwordController.text.trim();
+        if (user != null && mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (context) => const MainScreen()),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text(e.toString())));
+        }
+      } finally {
+        if (mounted) setState(() => _isLoading = false);
+      }
+    }
+  }
 
-      final user = await _authService.login(email, password);
-
-      setState(() => _isLoading = false);
-
-      if (user != null) {
+  Future<void> _signInWithGoogle() async {
+    setState(() => _isLoading = true);
+    try {
+      final user = await _authService.signInWithGoogle();
+      if (user != null && mounted) {
         Navigator.pushReplacement(
           context,
-          MaterialPageRoute(
-            builder: (context) => const MainScreen(),
-          ), // Cambiado aquí
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Error al iniciar sesión')),
+          MaterialPageRoute(builder: (context) => const MainScreen()),
         );
       }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error con Google: ${e.toString()}')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -1707,14 +2993,19 @@ class _LoginScreenState extends State<LoginScreen> {
 
 
 
+
     //TODO AP/cobros_app/lib/screens/main_screen.dart
 
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import '../services/auth_service.dart';
+import '../services/user_service.dart';
 import 'home_screen.dart';
 import 'cobros_screen.dart';
-import 'clientes_screen.dart'; // Nueva pantalla de clientes
+import 'clientes_screen.dart';
+import 'admin/admin_home_screen.dart'; // Importación corregida
 import '../utils/responsive.dart';
+import 'owner/owner_home_screen.dart';
+import 'collector/collector_home_screen.dart';
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -1725,38 +3016,186 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   int _selectedIndex = 0;
-  final List<Widget> _screens = [
-    const HomeScreen(),
-    const CobrosScreen(),
-    const ClientesScreen(), // Nueva pantalla agregada
-  ];
+  final UserService _userService = UserService();
+  final AuthService _authService = AuthService();
+  Map<String, dynamic>? _currentUserData;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserData();
+  }
+
+  Future<void> _loadUserData() async {
+    final userData = await _userService.getCurrentUserData();
+    setState(() {
+      _currentUserData = userData;
+      _isLoading = false;
+    });
+  }
+
+  List<Widget> _getScreensBasedOnRole() {
+    if (_isLoading) return [const Center(child: CircularProgressIndicator())];
+
+    switch (_currentUserData?['role']) {
+      case 'admin':
+        return [
+          const AdminHomeScreen(), // Ahora debería reconocer la clase
+          const CobrosScreen(),
+          const ClientesScreen(),
+        ];
+      case 'owner':
+        return [
+          const OwnerHomeScreen(),
+          const CobrosScreen(),
+          const ClientesScreen(),
+        ];
+      case 'collector':
+        return [
+          const CollectorHomeScreen(),
+          const CobrosScreen(),
+          const SizedBox(),
+        ];
+      default:
+        return [const HomeScreen()];
+    }
+  }
+
+  List<Widget> _getMenuItems(BuildContext context) {
+    if (_isLoading) return [const SizedBox()];
+
+    final menuItems = <Widget>[
+      ListTile(
+        leading: const Icon(Icons.home),
+        title: const Text('Inicio'),
+        selected: _selectedIndex == 0,
+        selectedTileColor: Colors.blue[100],
+        onTap: () => _updateIndex(0, context),
+      ),
+    ];
+
+    if (_currentUserData?['role'] == 'admin') {
+      menuItems.addAll([
+        ListTile(
+          leading: const Icon(Icons.supervised_user_circle),
+          title: const Text('Usuarios'),
+          selected: _selectedIndex == 1,
+          selectedTileColor: Colors.blue[100],
+          onTap: () => _updateIndex(1, context),
+        ),
+        ListTile(
+          leading: const Icon(Icons.business),
+          title: const Text('Oficinas'),
+          selected: _selectedIndex == 2,
+          selectedTileColor: Colors.blue[100],
+          onTap: () => _updateIndex(2, context),
+        ),
+      ]);
+    } else if (_currentUserData?['role'] == 'owner') {
+      menuItems.add(
+        ListTile(
+          leading: const Icon(Icons.group_add),
+          title: const Text('Registrar Cobradores'),
+          selected: _selectedIndex == 1,
+          selectedTileColor: Colors.blue[100],
+          onTap: () => _updateIndex(1, context),
+        ),
+      );
+    }
+
+    menuItems.addAll([
+      ListTile(
+        leading: const Icon(Icons.payment),
+        title: const Text('Cobros'),
+        selected: _selectedIndex == 3,
+        selectedTileColor: Colors.blue[100],
+        onTap: () => _updateIndex(3, context),
+      ),
+      const Divider(),
+      ListTile(
+        leading: const Icon(Icons.logout),
+        title: const Text('Cerrar Sesión'),
+        onTap: () async {
+          await _authService.signOut();
+          if (Responsive.isMobile(context)) Navigator.pop(context);
+        },
+      ),
+    ]);
+
+    return menuItems;
+  }
+
+  void _updateIndex(int index, BuildContext context) {
+    setState(() => _selectedIndex = index);
+    if (Responsive.isMobile(context)) Navigator.pop(context);
+  }
 
   @override
   Widget build(BuildContext context) {
     final bool isMobile = Responsive.isMobile(context);
+    final screens = _getScreensBasedOnRole();
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('CLIQ'),
+        title: _buildAppBarTitle(),
         toolbarHeight: isMobile ? 56 : 64,
         backgroundColor: Theme.of(context).primaryColor,
         automaticallyImplyLeading: isMobile,
+        actions: _buildAppBarActions(),
       ),
       drawer: isMobile ? _buildDrawer(context) : null,
       body: Row(
         children: [
           if (!isMobile) _buildDesktopMenu(context),
-          Expanded(child: _screens[_selectedIndex]),
+          Expanded(child: screens[_selectedIndex]),
         ],
       ),
     );
+  }
+
+  Widget _buildAppBarTitle() {
+    if (_isLoading) return const Text('Cargando...');
+
+    String roleName;
+    switch (_currentUserData?['role']) {
+      case 'admin':
+        roleName = 'Administrador';
+        break;
+      case 'owner':
+        roleName = 'Dueño de Oficina';
+        break;
+      case 'collector':
+        roleName = 'Cobrador';
+        break;
+      default:
+        roleName = 'Usuario';
+    }
+
+    return Text('CLIQ - $roleName');
+  }
+
+  List<Widget> _buildAppBarActions() {
+    return [
+      if (!_isLoading && _currentUserData != null)
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Center(
+            child: Text(
+              _currentUserData?['email'] ?? '',
+              style: const TextStyle(fontSize: 14),
+            ),
+          ),
+        ),
+      IconButton(icon: const Icon(Icons.refresh), onPressed: _loadUserData),
+    ];
   }
 
   Widget _buildDrawer(BuildContext context) {
     return Drawer(
       child: ListView(
         padding: EdgeInsets.zero,
-        children: _buildMenuItems(context),
+        children: _getMenuItems(context),
       ),
     );
   }
@@ -1771,89 +3210,43 @@ class _MainScreenState extends State<MainScreen> {
             height: 150,
             color: Colors.blue,
             padding: const EdgeInsets.all(16),
-            child: const Center(
-              child: Text(
-                'Menú Principal',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                ),
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  CircleAvatar(
+                    radius: 30,
+                    backgroundImage:
+                        _currentUserData?['photoUrl'] != null
+                            ? NetworkImage(_currentUserData!['photoUrl'])
+                            : null,
+                    child:
+                        _currentUserData?['photoUrl'] == null
+                            ? const Icon(Icons.person, size: 30)
+                            : null,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _currentUserData?['displayName'] ?? 'Usuario',
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                ],
               ),
             ),
           ),
-          Expanded(child: ListView(children: _buildMenuItems(context))),
+          Expanded(child: ListView(children: _getMenuItems(context))),
         ],
       ),
     );
-  }
-
-  List<Widget> _buildMenuItems(BuildContext context) {
-    return [
-      // Ítem de Inicio
-      ListTile(
-        leading: const Icon(Icons.home),
-        title: const Text('Inicio'),
-        selected: _selectedIndex == 0,
-        selectedTileColor: Colors.blue[100],
-        onTap: () {
-          setState(() => _selectedIndex = 0);
-          if (Responsive.isMobile(context)) {
-            Navigator.pop(context);
-          }
-        },
-      ),
-
-      // Ítem de Cobros
-      ListTile(
-        leading: const Icon(Icons.payment),
-        title: const Text('Cobros'),
-        selected: _selectedIndex == 1,
-        selectedTileColor: Colors.blue[100],
-        onTap: () {
-          setState(() => _selectedIndex = 1);
-          if (Responsive.isMobile(context)) {
-            Navigator.pop(context);
-          }
-        },
-      ),
-
-      // Nuevo ítem de Clientes
-      ListTile(
-        leading: const Icon(Icons.people),
-        title: const Text('Clientes'),
-        selected: _selectedIndex == 2,
-        selectedTileColor: Colors.blue[100],
-        onTap: () {
-          setState(() => _selectedIndex = 2);
-          if (Responsive.isMobile(context)) {
-            Navigator.pop(context);
-          }
-        },
-      ),
-
-      const Divider(),
-
-      // Ítem de Cerrar Sesión
-      ListTile(
-        leading: const Icon(Icons.logout),
-        title: const Text('Cerrar Sesión'),
-        onTap: () async {
-          await FirebaseAuth.instance.signOut();
-          if (Responsive.isMobile(context)) {
-            Navigator.pop(context);
-          }
-        },
-      ),
-    ];
   }
 }
 
 
 
+
   //TODO AP/cobros_app/lib/screens/nuevo_cliente_screen.dart
 
-  import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import '../models/cliente_models.dart';
 import '../data/database_helper.dart';
 
@@ -1980,7 +3373,7 @@ class _NuevoClienteScreenState extends State<NuevoClienteScreen> {
 
 
 
-//Models:
+//TODO Models:
     //TODO AP/cobros_app/lib/Models/user_model.dart
 
 class AppUser {
@@ -2008,6 +3401,7 @@ class AppUser {
     };
   }
 }
+
 
 
 
@@ -2187,3 +3581,104 @@ class Cobro {
 
 
 
+//TODO FIRESTOR reglas
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // REGLAS PARA USUARIOS
+    match /users/{userId} {
+      allow read: if isAdmin() || isOwnerOfUser(userId) || isUserHimself(userId);
+      allow create: if isAdmin() || isOwnerCreatingCollector();
+      allow update, delete: if isAdmin() || isOwnerUpdatingCollector(userId);
+    }
+    
+    // REGLAS PARA ADMINS
+    match /admins/{adminId} {
+      allow read, write: if isSuperAdmin();
+    }
+    
+    // REGLAS PARA OFICINAS
+    match /offices/{officeId} {
+      allow read: if isAdmin() || isOwnerOfOffice(officeId);
+      allow write: if isAdmin();
+    }
+    
+    // REGLAS PARA PAGOS
+    match /payments/{paymentId} {
+      allow read: if isAdmin() || isOwnerOfPaymentOffice(paymentId) || isCollectorOwner(paymentId);
+      allow create: if isAdmin() || isOwner() || isCollectorCreatingForHisOffice();
+      allow update: if isAdmin() || isOwnerOfPaymentOffice(paymentId);
+      allow delete: if isAdmin();
+    }
+
+    // ========= FUNCIONES DE AYUDA =========
+
+    function isAdmin() {
+      return request.auth != null &&
+             exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isSuperAdmin() {
+      return isAdmin() &&
+             get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.isSuperAdmin == true;
+    }
+
+    function isOwner() {
+      return request.auth != null &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'owner';
+    }
+
+    function isCollector() {
+      return request.auth != null &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'collector';
+    }
+
+    function isUserHimself(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    function isOwnerOfUser(targetUserId) {
+      return isOwner() &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.officeId ==
+             get(/databases/$(database)/documents/users/$(targetUserId)).data.officeId;
+    }
+
+    function isOwnerCreatingCollector() {
+      return isOwner() &&
+             request.resource.data.role == 'collector' &&
+             request.resource.data.officeId ==
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.officeId;
+    }
+
+    function isOwnerUpdatingCollector(targetUserId) {
+      return isOwner() &&
+             get(/databases/$(database)/documents/users/$(targetUserId)).data.role == 'collector' &&
+             isOwnerOfUser(targetUserId);
+    }
+
+    function isOwnerOfOffice(officeId) {
+      return isOwner() &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.officeId == officeId;
+    }
+
+    function isOwnerOfPaymentOffice(paymentId) {
+      return isOwner() &&
+             get(/databases/$(database)/documents/payments/$(paymentId)).data.officeId ==
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.officeId;
+    }
+
+    function isCollectorOwner(paymentId) {
+      return isCollector() &&
+             get(/databases/$(database)/documents/payments/$(paymentId)).data.collectorId == request.auth.uid;
+    }
+
+    function isCollectorCreatingForHisOffice() {
+      return isCollector() &&
+             request.resource.data.officeId ==
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.officeId &&
+             request.resource.data.collectorId == request.auth.uid;
+    }
+  }
+}

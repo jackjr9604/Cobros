@@ -1,3 +1,6 @@
+import 'package:cobros_app/screens/admin/offices_screen.dart';
+import 'package:cobros_app/screens/admin/users_screen.dart';
+import 'package:cobros_app/screens/owner/register_collector_screen.dart';
 import 'package:flutter/material.dart';
 import '../services/auth_service.dart';
 import '../services/user_service.dart';
@@ -10,7 +13,12 @@ import 'owner/owner_home_screen.dart';
 import 'collector/collector_home_screen.dart';
 
 class MainScreen extends StatefulWidget {
-  const MainScreen({super.key});
+  final String userRole; // Añade este parámetro
+
+  const MainScreen({
+    super.key,
+    required this.userRole,
+  }); // Actualiza el constructor
 
   @override
   State<MainScreen> createState() => _MainScreenState();
@@ -40,25 +48,23 @@ class _MainScreenState extends State<MainScreen> {
   List<Widget> _getScreensBasedOnRole() {
     if (_isLoading) return [const Center(child: CircularProgressIndicator())];
 
-    switch (_currentUserData?['role']) {
+    switch (widget.userRole) {
       case 'admin':
         return [
-          const AdminHomeScreen(), // Ahora debería reconocer la clase
+          const AdminHomeScreen(),
+          const UsersScreen(),
+          const OfficesScreen(),
           const CobrosScreen(),
-          const ClientesScreen(),
         ];
       case 'owner':
         return [
+          const HomeScreen(),
           const OwnerHomeScreen(),
-          const CobrosScreen(),
           const ClientesScreen(),
+          const CobrosScreen(),
         ];
       case 'collector':
-        return [
-          const CollectorHomeScreen(),
-          const CobrosScreen(),
-          const SizedBox(),
-        ];
+        return [const CollectorHomeScreen(), const CobrosScreen()];
       default:
         return [const HomeScreen()];
     }
@@ -77,7 +83,7 @@ class _MainScreenState extends State<MainScreen> {
       ),
     ];
 
-    if (_currentUserData?['role'] == 'admin') {
+    if (widget.userRole == 'admin') {
       menuItems.addAll([
         ListTile(
           leading: const Icon(Icons.supervised_user_circle),
@@ -105,7 +111,7 @@ class _MainScreenState extends State<MainScreen> {
         ),
       );
     }
-
+    ;
     menuItems.addAll([
       ListTile(
         leading: const Icon(Icons.payment),
@@ -114,6 +120,7 @@ class _MainScreenState extends State<MainScreen> {
         selectedTileColor: Colors.blue[100],
         onTap: () => _updateIndex(3, context),
       ),
+
       const Divider(),
       ListTile(
         leading: const Icon(Icons.logout),
@@ -135,6 +142,7 @@ class _MainScreenState extends State<MainScreen> {
 
   @override
   Widget build(BuildContext context) {
+    print('Datos del usuario: $_currentUserData'); // Ver en consola
     final bool isMobile = Responsive.isMobile(context);
     final screens = _getScreensBasedOnRole();
 

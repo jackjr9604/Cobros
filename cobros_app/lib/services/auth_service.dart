@@ -9,22 +9,24 @@ class AuthService {
 
   User? get currentUser => _auth.currentUser;
 
-  // Método de registro básico (público)
-  Future<User?> registerUser({
+  // Registro básico con email y contraseña
+  Future<User?> registerWithEmailAndPassword({
     required String email,
     required String password,
+    required String role,
+    String? officeId,
     String? displayName,
   }) async {
     try {
-      // 1. Registrar usuario en Firebase Auth
       final userCredential = await _auth.createUserWithEmailAndPassword(
         email: email,
         password: password,
       );
 
-      // 2. Crear perfil del usuario en Firestore
       await _createUserProfile(
         user: userCredential.user!,
+        role: role,
+        officeId: officeId,
         displayName: displayName,
       );
 
@@ -34,106 +36,43 @@ class AuthService {
     }
   }
 
-  // Método para registrar usuarios con roles (admin, owner, collector)
+  // Registro completo con rol y oficina
   Future<User?> registerUserWithRole({
     required String email,
     required String password,
     required String role,
-    String? officeId, // Para cobradores y dueños
-    String? officeName, // Solo para crear nueva oficina con dueño
+    String? officeId,
+    String? officeName,
     String? displayName,
   }) async {
-    User? user; // Declaración movida aquí para que sea visible en el catch
-
     try {
-      // Registrar el usuario
-      user = await registerUser(
-        email: email,
-        password: password,
-        displayName: displayName,
-      );
-
-      if (user == null) return null;
-
-      // Si es dueño y se proporciona nombre de oficina, crear oficina
+      // Crear oficina si es dueño y se provee nombre
       String? newOfficeId;
       if (role == 'owner' && officeName != null) {
         final officeRef = await _firestore.collection('offices').add({
           'name': officeName,
           'createdAt': FieldValue.serverTimestamp(),
-          'createdBy': _auth.currentUser?.uid,
         });
         newOfficeId = officeRef.id;
       }
 
-      // Actualizar perfil con información de rol
-      await _firestore.collection('users').doc(user.uid).update({
-        'role': role,
-        if (newOfficeId != null) 'officeId': newOfficeId,
-        if (officeId != null) 'officeId': officeId,
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
+      // Registrar usuario
+      final user = await registerWithEmailAndPassword(
+        email: email,
+        password: password,
+        role: role,
+        officeId: newOfficeId ?? officeId,
+        displayName: displayName,
+      );
 
       return user;
     } catch (e) {
-      // Si falla, eliminar el usuario creado
-      if (user != null) {
-        await user.delete();
-      }
+      if (currentUser != null) await currentUser!.delete();
       rethrow;
     }
   }
 
-  // Método para que dueños registren cobradores
-  Future<User?> registerCollector({
-    required String email,
-    required String password,
-    required String officeId,
-    String? displayName,
-  }) async {
-    // Verificar que el usuario actual es dueño de esta oficina
-    final currentUserData = await getCurrentUserData();
-    if (currentUserData?['role'] != 'owner' ||
-        currentUserData?['officeId'] != officeId) {
-      throw Exception(
-        'No tienes permisos para registrar cobradores en esta oficina',
-      );
-    }
-
-    // Registrar el cobrador
-    return registerUserWithRole(
-      email: email,
-      password: password,
-      role: 'collector',
-      officeId: officeId,
-      displayName: displayName,
-    );
-  }
-
-  // Método privado para crear perfil inicial
-  Future<void> _createUserProfile({
-    required User user,
-    String? displayName,
-  }) async {
-    await _firestore.collection('users').doc(user.uid).set({
-      'email': user.email,
-      'displayName': displayName ?? user.displayName,
-      'photoUrl': user.photoURL,
-      'role': 'user', // Rol por defecto
-      'createdAt': FieldValue.serverTimestamp(),
-      'isActive': true,
-    });
-  }
-
-  // Obtener datos del usuario actual
-  Future<Map<String, dynamic>?> getCurrentUserData() async {
-    final user = _auth.currentUser;
-    if (user == null) return null;
-    final doc = await _firestore.collection('users').doc(user.uid).get();
-    return doc.data();
-  }
-
-  // Método para iniciar sesión con email y contraseña (antes llamado "login")
+  // Inicio de sesión con email y contraseña
   Future<User?> signInWithEmailAndPassword({
     required String email,
     required String password,
@@ -149,29 +88,31 @@ class AuthService {
     }
   }
 
-  // Método para iniciar sesión con Google
+  // Inicio de sesión con Google
   Future<User?> signInWithGoogle() async {
     try {
-      final googleUser = await _googleSignIn.signIn();
+      final GoogleSignInAccount? googleUser = await _googleSignIn.signIn();
       if (googleUser == null) return null;
 
-      final googleAuth = await googleUser.authentication;
-      final credential = GoogleAuthProvider.credential(
+      final GoogleSignInAuthentication googleAuth =
+          await googleUser.authentication;
+
+      final AuthCredential credential = GoogleAuthProvider.credential(
         accessToken: googleAuth.accessToken,
         idToken: googleAuth.idToken,
       );
 
-      final userCredential = await _auth.signInWithCredential(credential);
+      final UserCredential userCredential = await _auth.signInWithCredential(
+        credential,
+      );
 
       // Crear perfil si es nuevo usuario
-      if (userCredential.additionalUserInfo?.isNewUser ?? false) {
-        await _firestore.collection('users').doc(userCredential.user!.uid).set({
-          'email': userCredential.user!.email,
-          'displayName': userCredential.user!.displayName,
-          'photoUrl': userCredential.user!.photoURL,
-          'createdAt': FieldValue.serverTimestamp(),
-          'isActive': true,
-        });
+      if (userCredential.additionalUserInfo!.isNewUser) {
+        await _createUserProfile(
+          user: userCredential.user!,
+          role: 'user', // Rol por defecto
+          displayName: googleUser.displayName,
+        );
       }
 
       return userCredential.user;
@@ -181,31 +122,120 @@ class AuthService {
     }
   }
 
-  // Método para cerrar sesión
+  // Método para registro básico (usado en RegisterScreen)
+  Future<User?> registerUser({
+    required String email,
+    required String password,
+    String? displayName,
+  }) async {
+    try {
+      return await registerWithEmailAndPassword(
+        email: email,
+        password: password,
+        role: 'user', // Rol por defecto
+        displayName: displayName,
+      );
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  // Método específico para registrar cobradores (usado en RegisterCollectorScreen)
+  Future<User?> registerCollector({
+    required String email,
+    required String password,
+    required String officeId,
+    String? displayName,
+  }) async {
+    try {
+      final user = await _auth.createUserWithEmailAndPassword(
+        email: email,
+        password: password,
+      );
+
+      await _firestore.collection('users').doc(user.user!.uid).set({
+        'email': email,
+        'role': 'collector', // <-- Campo crítico
+        'officeId': officeId,
+        'createdAt': FieldValue.serverTimestamp(),
+        'isActive': true,
+      });
+
+      return user.user;
+    } catch (e) {
+      print('Error registrando cobrador: $e');
+      return null;
+    }
+  }
+
+  // Cerrar sesión
   Future<void> signOut() async {
     try {
       await _auth.signOut();
       await _googleSignIn.signOut();
     } catch (e) {
       print('Error al cerrar sesión: $e');
-      throw Exception('No se pudo cerrar la sesión correctamente');
+      throw Exception('Error al cerrar sesión');
     }
   }
 
-  // Manejo de errores
+  // Crear perfil de usuario en Firestore
+  Future<void> _createUserProfile({
+    required User user,
+    required String role,
+    String? officeId,
+    String? displayName,
+  }) async {
+    await _firestore.collection('users').doc(user.uid).set({
+      'uid': user.uid,
+      'email': user.email,
+      'displayName': displayName ?? user.displayName,
+      'photoURL': user.photoURL,
+      'role': role,
+      'officeId': officeId,
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+      'isActive': true,
+    });
+  }
+
+  // Obtener datos del usuario actual
+  Future<Map<String, dynamic>> getCurrentUserData() async {
+    final User? user = _auth.currentUser;
+    if (user == null) throw Exception('Usuario no autenticado');
+
+    final DocumentSnapshot userDoc =
+        await _firestore.collection('users').doc(user.uid).get();
+
+    if (!userDoc.exists) throw Exception('Perfil de usuario no encontrado');
+
+    return {
+      'uid': user.uid,
+      'email': user.email,
+      ...userDoc.data() as Map<String, dynamic>,
+    };
+  }
+
+  // Manejo de errores de autenticación
   Exception _handleAuthError(String code) {
     switch (code) {
       case 'user-not-found':
       case 'wrong-password':
-        return Exception('Correo o contraseña incorrectos');
+        return Exception('Credenciales inválidas');
       case 'user-disabled':
-        return Exception('La cuenta ha sido deshabilitada');
+        return Exception('Cuenta deshabilitada');
       case 'too-many-requests':
-        return Exception('Demasiados intentos. Intenta más tarde');
+        return Exception('Demasiados intentos. Intente más tarde');
+      case 'email-already-in-use':
+        return Exception('El correo ya está registrado');
       case 'invalid-email':
-        return Exception('El correo electrónico no es válido');
+        return Exception('Correo electrónico inválido');
+      case 'weak-password':
+        return Exception('La contraseña debe tener al menos 6 caracteres');
+      case 'operation-not-allowed':
+        return Exception('Operación no permitida');
       default:
-        return Exception('Error al iniciar sesión: $code');
+        return Exception('Error de autenticación: $code');
     }
   }
 }
